@@ -152,7 +152,7 @@ async def find_claude_companies_jobs(
     days_back: int = 30,
     min_employees: int = 50,
     max_employees: int = 10000,
-    countries: list[str] | None = None,
+    countries: str | None = None,
 ) -> dict:
     """
     Find companies mentioning Claude/Anthropic in job postings.
@@ -163,7 +163,7 @@ async def find_claude_companies_jobs(
         days_back: How many days back to search (default 30)
         min_employees: Minimum company size (default 50)
         max_employees: Maximum company size (default 10000)
-        countries: Filter by country codes (e.g., ["US", "GB", "DE"])
+        countries: Comma-separated country codes (e.g., "US, GB, DE")
 
     Returns:
         Companies with Claude signals in their job postings
@@ -189,7 +189,9 @@ async def find_claude_companies_jobs(
     }
 
     if countries:
-        payload["job_country_code_or"] = countries
+        # Parse comma-separated country codes to list
+        country_list = [c.strip().upper() for c in countries.split(",") if c.strip()]
+        payload["job_country_code_or"] = country_list
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -533,7 +535,7 @@ async def full_claude_company_scan(
 
 @mcp.tool()
 async def batch_check_companies(
-    companies: list[str],
+    companies: str,
     include_evidence: bool = False,
 ) -> dict:
     """
@@ -541,7 +543,7 @@ async def batch_check_companies(
     Perfect for enriching CRM data from HubSpot, Salesforce, etc.
 
     Args:
-        companies: List of company names or GitHub orgs (e.g., ["stripe", "vercel", "shopify"])
+        companies: Comma-separated company names or GitHub orgs (e.g., "stripe, vercel, shopify")
         include_evidence: Include detailed evidence (slower, more data)
 
     Returns:
@@ -556,11 +558,14 @@ async def batch_check_companies(
         return {"error": "GITHUB_TOKEN required"}
 
     if not companies:
-        return {"error": "No companies provided", "hint": "Pass a list of company names"}
+        return {"error": "No companies provided", "hint": "Pass a comma-separated list of company names"}
 
-    if len(companies) > 50:
+    # Parse comma-separated companies to list
+    company_list = [c.strip() for c in companies.split(",") if c.strip()]
+
+    if len(company_list) > 50:
         return {
-            "error": f"Too many companies ({len(companies)}). Max 50 per batch.",
+            "error": f"Too many companies ({len(company_list)}). Max 50 per batch.",
             "hint": "Split into smaller batches",
         }
 
@@ -574,7 +579,7 @@ async def batch_check_companies(
     found_using_claude = 0
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        for company in companies:
+        for company in company_list:
             checked += 1
 
             # Normalize company name
@@ -1184,7 +1189,7 @@ async def check_pypi_anthropic_usage(company: str) -> dict:
 
 # ============ LINKEDIN TOOLS (Voyager API) ============
 
-async def _search_linkedin_posts_impl(company: str, keywords: list[str] | None = None) -> dict:
+async def _search_linkedin_posts_impl(company: str, keywords: str | None = None) -> dict:
     """Internal implementation for LinkedIn posts search."""
     if not LINKEDIN_COOKIE:
         return {
@@ -1205,7 +1210,11 @@ async def _search_linkedin_posts_impl(company: str, keywords: list[str] | None =
     cookie, jsessionid = session
     headers = get_linkedin_headers_sync(cookie, jsessionid)
 
-    search_keywords = keywords or ["Claude", "Anthropic", "Claude Code"]
+    # Parse keywords from comma-separated string or use defaults
+    if keywords:
+        search_keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+    else:
+        search_keywords = ["Claude", "Anthropic", "Claude Code"]
     all_posts = []
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1307,7 +1316,7 @@ async def _search_linkedin_posts_impl(company: str, keywords: list[str] | None =
 
 
 @mcp.tool()
-async def search_linkedin_posts(company: str, keywords: list[str] | None = None) -> dict:
+async def search_linkedin_posts(company: str, keywords: str | None = None) -> dict:
     """
     Search LinkedIn for posts mentioning a company and Claude/Anthropic.
     Uses LinkedIn's Voyager API directly (no Selenium needed).
@@ -1315,7 +1324,8 @@ async def search_linkedin_posts(company: str, keywords: list[str] | None = None)
 
     Args:
         company: Company name to search for
-        keywords: Additional keywords (default: Claude, Anthropic)
+        keywords: Comma-separated keywords (default: "Claude, Anthropic, Claude Code")
+                  Example: "Claude Code, MCP, Anthropic SDK"
 
     Returns:
         LinkedIn posts mentioning the company and Claude/Anthropic
@@ -1325,7 +1335,7 @@ async def search_linkedin_posts(company: str, keywords: list[str] | None = None)
 
 async def _search_linkedin_jobs_impl(
     company: str | None = None,
-    keywords: list[str] | None = None,
+    keywords: str | None = None,
     location: str | None = None,
 ) -> dict:
     """Internal implementation for LinkedIn jobs search."""
@@ -1347,7 +1357,11 @@ async def _search_linkedin_jobs_impl(
 
     cookie, jsessionid = session
     headers = get_linkedin_headers_sync(cookie, jsessionid)
-    search_keywords = keywords or ["Claude", "Anthropic", "Claude Code", "MCP"]
+    # Parse keywords from comma-separated string or use defaults
+    if keywords:
+        search_keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+    else:
+        search_keywords = ["Claude", "Anthropic", "Claude Code", "MCP"]
     all_jobs = []
 
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1481,7 +1495,7 @@ async def _search_linkedin_jobs_impl(
 @mcp.tool()
 async def search_linkedin_jobs(
     company: str | None = None,
-    keywords: list[str] | None = None,
+    keywords: str | None = None,
     location: str | None = None,
 ) -> dict:
     """
@@ -1491,11 +1505,12 @@ async def search_linkedin_jobs(
 
     Args:
         company: Company name to filter by (optional)
-        keywords: Search keywords (default: Claude, Anthropic, Claude Code)
+        keywords: Comma-separated search keywords (default: "Claude, Anthropic, Claude Code, MCP")
+                  Example: "Claude Code, MCP, Anthropic SDK"
         location: Location filter (optional, e.g., "San Francisco")
 
     Returns:
-        Job postings mentioning Claude/Anthropic
+        Job postings mentioning Claude/Anthropic with company names
     """
     return await _search_linkedin_jobs_impl(company, keywords, location)
 
