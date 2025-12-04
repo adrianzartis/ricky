@@ -50,12 +50,70 @@ SIGNAL_WEIGHTS = {
 
 # ============ LINKEDIN HELPERS ============
 
+# Cache for LinkedIn session
+_linkedin_session_cache: dict = {"jsessionid": None, "cookie": None}
+
+
+async def _get_linkedin_session() -> tuple[str, str] | None:
+    """Get a valid LinkedIn session with JSESSIONID."""
+    global _linkedin_session_cache
+
+    if not LINKEDIN_COOKIE:
+        return None
+
+    cookie = LINKEDIN_COOKIE
+    if not cookie.startswith("li_at="):
+        cookie = f"li_at={cookie}"
+
+    # Return cached session if we have one
+    if _linkedin_session_cache["jsessionid"] and _linkedin_session_cache["cookie"] == cookie:
+        return cookie, _linkedin_session_cache["jsessionid"]
+
+    # Get fresh JSESSIONID from LinkedIn
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        headers = {
+            "cookie": cookie,
+            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        }
+
+        try:
+            resp = await client.get("https://www.linkedin.com/feed/", headers=headers)
+
+            # Check if redirected to login (cookie expired)
+            if "login" in str(resp.url) or resp.status_code == 401:
+                return None
+
+            # Extract JSESSIONID from cookies
+            for cookie_obj in client.cookies.jar:
+                if cookie_obj.name == "JSESSIONID":
+                    jsessionid = cookie_obj.value.strip('"')
+                    _linkedin_session_cache["jsessionid"] = jsessionid
+                    _linkedin_session_cache["cookie"] = cookie
+                    return cookie, jsessionid
+        except Exception:
+            pass
+
+    return None
+
+
+def get_linkedin_headers_sync(cookie: str, jsessionid: str) -> dict:
+    """Build LinkedIn API headers with valid session."""
+    return {
+        "cookie": f"{cookie}; JSESSIONID=\"{jsessionid}\"",
+        "csrf-token": jsessionid,
+        "x-li-lang": "en_US",
+        "x-restli-protocol-version": "2.0.0",
+        "accept": "application/vnd.linkedin.normalized+json+2.1",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    }
+
+
 def get_linkedin_headers() -> dict:
-    """Get headers for LinkedIn Voyager API calls."""
+    """Get headers for LinkedIn Voyager API calls (legacy sync version, may not work)."""
     if not LINKEDIN_COOKIE:
         return {}
 
-    # Extract JSESSIONID from cookie if present, or generate csrf token
     cookie = LINKEDIN_COOKIE
     if not cookie.startswith("li_at="):
         cookie = f"li_at={cookie}"
@@ -714,20 +772,10 @@ async def check_companies_from_crm(
     }
 
 
-@mcp.tool()
-async def does_company_use_claude(
-    company: str,
-) -> dict:
-    """
-    Quick check if a specific company uses Claude/Anthropic.
-    Searches their GitHub org for Claude signals.
+# Internal implementation functions (called by both tools and full_multi_source_scan)
 
-    Args:
-        company: Company name or GitHub org (e.g., 'stripe', 'vercel', 'netflix')
-
-    Returns:
-        Whether the company appears to use Claude and what signals were found
-    """
+async def _does_company_use_claude_impl(company: str) -> dict:
+    """Internal implementation for checking if a company uses Claude."""
     if not GITHUB_TOKEN:
         return {"error": "GITHUB_TOKEN required"}
 
@@ -841,24 +889,25 @@ async def does_company_use_claude(
     }
 
 
-# ============ NEW SIGNAL SOURCES (FREE APIs) ============
-
 @mcp.tool()
-async def search_hackernews_signals(
-    company: str,
-    days_back: int = 365,
-) -> dict:
+async def does_company_use_claude(company: str) -> dict:
     """
-    Search Hacker News for discussions about a company using Claude.
-    Uses the free Algolia HN Search API (no key needed).
+    Quick check if a specific company uses Claude/Anthropic.
+    Searches their GitHub org for Claude signals.
 
     Args:
-        company: Company name to search for
-        days_back: How far back to search (default 365 days)
+        company: Company name or GitHub org (e.g., 'stripe', 'vercel', 'netflix')
 
     Returns:
-        HN discussions mentioning the company and Claude/Anthropic
+        Whether the company appears to use Claude and what signals were found
     """
+    return await _does_company_use_claude_impl(company)
+
+
+# ============ NEW SIGNAL SOURCES (FREE APIs) ============
+
+async def _search_hackernews_signals_impl(company: str, days_back: int = 365) -> dict:
+    """Internal implementation for HN search."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Search for company + Claude mentions
         queries = [
@@ -939,20 +988,23 @@ async def search_hackernews_signals(
 
 
 @mcp.tool()
-async def check_npm_anthropic_usage(
-    company: str,
-) -> dict:
+async def search_hackernews_signals(company: str, days_back: int = 365) -> dict:
     """
-    Check if a company has npm packages that depend on @anthropic-ai/sdk.
-    Uses the free npm registry API (no key needed).
-    Very high confidence signal - they're publishing code that uses Anthropic.
+    Search Hacker News for discussions about a company using Claude.
+    Uses the free Algolia HN Search API (no key needed).
 
     Args:
-        company: Company name or npm org scope (e.g., 'vercel', 'stripe')
+        company: Company name to search for
+        days_back: How far back to search (default 365 days)
 
     Returns:
-        npm packages from the company that depend on Anthropic SDK
+        HN discussions mentioning the company and Claude/Anthropic
     """
+    return await _search_hackernews_signals_impl(company, days_back)
+
+
+async def _check_npm_anthropic_usage_impl(company: str) -> dict:
+    """Internal implementation for npm check."""
     org_variations = [
         company.lower(),
         company.lower().replace(" ", ""),
@@ -1029,20 +1081,23 @@ async def check_npm_anthropic_usage(
 
 
 @mcp.tool()
-async def check_pypi_anthropic_usage(
-    company: str,
-) -> dict:
+async def check_npm_anthropic_usage(company: str) -> dict:
     """
-    Check if a company has PyPI packages that depend on the anthropic SDK.
-    Uses the free PyPI JSON API (no key needed).
+    Check if a company has npm packages that depend on @anthropic-ai/sdk.
+    Uses the free npm registry API (no key needed).
     Very high confidence signal - they're publishing code that uses Anthropic.
 
     Args:
-        company: Company name to search for in package authors/maintainers
+        company: Company name or npm org scope (e.g., 'vercel', 'stripe')
 
     Returns:
-        PyPI packages from the company that depend on anthropic
+        npm packages from the company that depend on Anthropic SDK
     """
+    return await _check_npm_anthropic_usage_impl(company)
+
+
+async def _check_pypi_anthropic_usage_impl(company: str) -> dict:
+    """Internal implementation for PyPI check."""
     # PyPI doesn't have a great search API, so we'll use the simple API
     # and search via the JSON endpoint
     anthropic_packages = []
@@ -1111,25 +1166,26 @@ async def check_pypi_anthropic_usage(
     }
 
 
-# ============ LINKEDIN TOOLS (Voyager API) ============
-
 @mcp.tool()
-async def search_linkedin_posts(
-    company: str,
-    keywords: list[str] | None = None,
-) -> dict:
+async def check_pypi_anthropic_usage(company: str) -> dict:
     """
-    Search LinkedIn for posts mentioning a company and Claude/Anthropic.
-    Uses LinkedIn's Voyager API directly (no Selenium needed).
-    Requires LINKEDIN_COOKIE (li_at value from browser).
+    Check if a company has PyPI packages that depend on the anthropic SDK.
+    Uses the free PyPI JSON API (no key needed).
+    Very high confidence signal - they're publishing code that uses Anthropic.
 
     Args:
-        company: Company name to search for
-        keywords: Additional keywords (default: Claude, Anthropic)
+        company: Company name to search for in package authors/maintainers
 
     Returns:
-        LinkedIn posts mentioning the company and Claude/Anthropic
+        PyPI packages from the company that depend on anthropic
     """
+    return await _check_pypi_anthropic_usage_impl(company)
+
+
+# ============ LINKEDIN TOOLS (Voyager API) ============
+
+async def _search_linkedin_posts_impl(company: str, keywords: list[str] | None = None) -> dict:
+    """Internal implementation for LinkedIn posts search."""
     if not LINKEDIN_COOKIE:
         return {
             "status": "skipped",
@@ -1138,9 +1194,16 @@ async def search_linkedin_posts(
             "results": [],
         }
 
-    headers = get_linkedin_headers()
-    if not headers:
-        return {"error": "Failed to build LinkedIn headers"}
+    # Get valid LinkedIn session with JSESSIONID
+    session = await _get_linkedin_session()
+    if not session:
+        return {
+            "error": "LinkedIn cookie expired or invalid",
+            "setup": "Refresh your li_at cookie from Chrome DevTools",
+        }
+
+    cookie, jsessionid = session
+    headers = get_linkedin_headers_sync(cookie, jsessionid)
 
     search_keywords = keywords or ["Claude", "Anthropic", "Claude Code"]
     all_posts = []
@@ -1150,41 +1213,43 @@ async def search_linkedin_posts(
             query = f"{company} {keyword}"
 
             try:
-                # Use LinkedIn's search endpoint for content
-                resp = await client.get(
-                    f"{LINKEDIN_API}/search/blended",
-                    params={
-                        "keywords": query,
-                        "origin": "GLOBAL_SEARCH_HEADER",
-                        "q": "all",
-                        "filters": "List(resultType->CONTENT)",
-                        "count": 20,
-                    },
-                    headers=headers,
+                # Use LinkedIn's GraphQL search endpoint (from linkedin-api library)
+                graphql_url = (
+                    f"{LINKEDIN_API}/graphql?variables=(start:0,origin:GLOBAL_SEARCH_HEADER,"
+                    f"query:(keywords:{query},flagshipSearchIntent:SEARCH_SRP,"
+                    f"queryParameters:List((key:resultType,value:List(CONTENT)))))"
+                    f"&queryId=voyagerSearchDashClusters.b0928897b71bd00a5a7291755dcd64f0"
                 )
+                resp = await client.get(graphql_url, headers=headers)
 
                 if resp.status_code == 200:
                     data = resp.json()
 
-                    # Parse the response for posts
-                    elements = data.get("data", {}).get("elements", [])
-                    if not elements:
-                        elements = data.get("elements", [])
+                    # Parse the GraphQL response
+                    data_clusters = data.get("data", {}).get("searchDashClustersByAll", {})
+                    for cluster in data_clusters.get("elements", []):
+                        for item in cluster.get("items", []):
+                            entity = item.get("item", {}).get("entityResult", {})
+                            if entity:
+                                # Extract post text from title or summary
+                                title = entity.get("title", {})
+                                text = ""
+                                if isinstance(title, dict):
+                                    text = title.get("text", "")
+                                summary = entity.get("summary", {})
+                                if isinstance(summary, dict) and not text:
+                                    text = summary.get("text", "")
 
-                    for element in elements:
-                        # Extract post data from various response formats
-                        post_data = element.get("content", element)
+                                post = {
+                                    "type": "post",
+                                    "query": query,
+                                    "text": text[:500] if text else "",
+                                    "author": entity.get("primarySubtitle", {}).get("text", "Unknown") if isinstance(entity.get("primarySubtitle"), dict) else "Unknown",
+                                    "url": entity.get("navigationUrl", ""),
+                                }
 
-                        post = {
-                            "type": "post",
-                            "query": query,
-                            "text": post_data.get("text", {}).get("text", "")[:500] if isinstance(post_data.get("text"), dict) else str(post_data.get("text", ""))[:500],
-                            "author": post_data.get("actor", {}).get("name", {}).get("text", "Unknown"),
-                            "url": f"https://www.linkedin.com/feed/update/{element.get('trackingUrn', element.get('entityUrn', ''))}",
-                        }
-
-                        if post["text"] and post not in all_posts:
-                            all_posts.append(post)
+                                if post["text"] and post not in all_posts:
+                                    all_posts.append(post)
 
                 elif resp.status_code == 401:
                     return {
@@ -1193,16 +1258,15 @@ async def search_linkedin_posts(
                     }
 
             except Exception as e:
-                # Try alternative search endpoint
+                # Try alternative search endpoint as fallback
                 try:
                     resp = await client.get(
-                        f"{LINKEDIN_API}/search/dash/clusters",
+                        f"{LINKEDIN_API}/search/blended",
                         params={
-                            "decorationId": "com.linkedin.voyager.dash.deco.search.SearchClusterCollection-175",
+                            "keywords": query,
                             "origin": "GLOBAL_SEARCH_HEADER",
                             "q": "all",
-                            "query": f"(keywords:{query},resultType:List(CONTENT))",
-                            "start": 0,
+                            "filters": "List(resultType->CONTENT)",
                             "count": 20,
                         },
                         headers=headers,
@@ -1210,8 +1274,8 @@ async def search_linkedin_posts(
 
                     if resp.status_code == 200:
                         data = resp.json()
-                        for element in data.get("included", []):
-                            if element.get("$type") == "com.linkedin.voyager.feed.render.UpdateV2":
+                        for element in data.get("included", data.get("elements", [])):
+                            if element.get("$type", "").endswith("UpdateV2") or "commentary" in element:
                                 text = element.get("commentary", {}).get("text", {}).get("text", "")
                                 if text:
                                     all_posts.append({
@@ -1243,24 +1307,28 @@ async def search_linkedin_posts(
 
 
 @mcp.tool()
-async def search_linkedin_jobs(
+async def search_linkedin_posts(company: str, keywords: list[str] | None = None) -> dict:
+    """
+    Search LinkedIn for posts mentioning a company and Claude/Anthropic.
+    Uses LinkedIn's Voyager API directly (no Selenium needed).
+    Requires LINKEDIN_COOKIE (li_at value from browser).
+
+    Args:
+        company: Company name to search for
+        keywords: Additional keywords (default: Claude, Anthropic)
+
+    Returns:
+        LinkedIn posts mentioning the company and Claude/Anthropic
+    """
+    return await _search_linkedin_posts_impl(company, keywords)
+
+
+async def _search_linkedin_jobs_impl(
     company: str | None = None,
     keywords: list[str] | None = None,
     location: str | None = None,
 ) -> dict:
-    """
-    Search LinkedIn for job postings mentioning Claude/Anthropic.
-    Can filter by company and/or search across all companies.
-    Uses LinkedIn's Voyager API directly (no Selenium needed).
-
-    Args:
-        company: Company name to filter by (optional)
-        keywords: Search keywords (default: Claude, Anthropic, Claude Code)
-        location: Location filter (optional, e.g., "San Francisco")
-
-    Returns:
-        Job postings mentioning Claude/Anthropic
-    """
+    """Internal implementation for LinkedIn jobs search."""
     if not LINKEDIN_COOKIE:
         return {
             "status": "skipped",
@@ -1269,7 +1337,16 @@ async def search_linkedin_jobs(
             "results": [],
         }
 
-    headers = get_linkedin_headers()
+    # Get valid LinkedIn session with JSESSIONID
+    session = await _get_linkedin_session()
+    if not session:
+        return {
+            "error": "LinkedIn cookie expired or invalid",
+            "setup": "Refresh your li_at cookie from Chrome DevTools",
+        }
+
+    cookie, jsessionid = session
+    headers = get_linkedin_headers_sync(cookie, jsessionid)
     search_keywords = keywords or ["Claude", "Anthropic", "Claude Code", "MCP"]
     all_jobs = []
 
@@ -1278,67 +1355,96 @@ async def search_linkedin_jobs(
             query = f"{company} {keyword}" if company else keyword
 
             try:
+                # Build query string in LinkedIn's format
+                query_dict = {
+                    "origin": "JOB_SEARCH_PAGE_QUERY_EXPANSION",
+                    "keywords": query,
+                    "selectedFilters": {
+                        "timePostedRange": "List(r86400)",  # Last 24 hours
+                    },
+                    "spellCorrectionEnabled": "true",
+                }
+                if location:
+                    query_dict["locationFallback"] = location
+
+                query_string = (
+                    str(query_dict)
+                    .replace(" ", "")
+                    .replace("'", "")
+                    .replace("{", "(")
+                    .replace("}", ")")
+                )
+
+                # Use the correct endpoint from linkedin-api library
                 params = {
-                    "decorationId": "com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollection-194",
+                    "decorationId": "com.linkedin.voyager.dash.deco.jobs.search.JobSearchCardsCollection-174",
                     "count": 25,
                     "q": "jobSearch",
-                    "query": f"(origin:JOB_SEARCH_PAGE_QUERY_EXPANSION,keywords:{query},locationUnion:(geoId:103644278),spellCorrectionEnabled:true)",
+                    "query": query_string,
                     "start": 0,
                 }
 
-                if location:
-                    params["query"] = f"(origin:JOB_SEARCH_PAGE_QUERY_EXPANSION,keywords:{query},locationUnion:(geoId:103644278),location:{location},spellCorrectionEnabled:true)"
-
+                from urllib.parse import urlencode
+                url = f"{LINKEDIN_API}/voyagerJobsDashJobCards?{urlencode(params, safe='(),:')}"
                 resp = await client.get(
-                    f"{LINKEDIN_API}/jobs/jobPostings",
-                    params={"q": "search", "keywords": query, "count": 25},
-                    headers=headers,
+                    url,
+                    headers={**headers, "accept": "application/vnd.linkedin.normalized+json+2.1"},
                 )
 
                 if resp.status_code == 200:
                     data = resp.json()
 
-                    for element in data.get("elements", data.get("included", [])):
-                        if "title" in element or element.get("$type", "").endswith("JobPosting"):
+                    # Build lookup for referenced objects
+                    urn_lookup = {}
+                    for el in data.get("included", []):
+                        if el.get("entityUrn"):
+                            urn_lookup[el["entityUrn"]] = el
+
+                    # Use JobPostingCard which has full display info
+                    for element in data.get("included", []):
+                        if element.get("$type") == "com.linkedin.voyager.dash.jobs.JobPostingCard":
+                            # Skip cards without full data (only have entityUrn)
+                            if not element.get("primaryDescription"):
+                                continue
+
+                            # Extract title - can be dict with text property or string
+                            title_field = element.get("title", {})
+                            if isinstance(title_field, dict):
+                                title = title_field.get("text", "")
+                            else:
+                                title = str(title_field) if title_field else ""
+
+                            # If no title in card, try referenced job posting
+                            if not title:
+                                job_ref = element.get("*jobPosting")
+                                if job_ref and job_ref in urn_lookup:
+                                    title = urn_lookup[job_ref].get("title", "")
+
+                            # Get company from primaryDescription
+                            company_name = ""
+                            primary_desc = element.get("primaryDescription", {})
+                            if isinstance(primary_desc, dict):
+                                company_name = primary_desc.get("text", "")
+
+                            # Get location from secondaryDescription
+                            loc = ""
+                            secondary_desc = element.get("secondaryDescription", {})
+                            if isinstance(secondary_desc, dict):
+                                loc = secondary_desc.get("text", "")
+
+                            # Build job URL from URN
+                            job_urn = element.get("jobPostingUrn", element.get("*jobPosting", ""))
+                            job_id = job_urn.split(":")[-1] if job_urn else ""
+
                             job = {
-                                "title": element.get("title", ""),
-                                "company": element.get("companyName", element.get("companyDetails", {}).get("company", "")),
-                                "location": element.get("formattedLocation", element.get("location", "")),
-                                "url": f"https://www.linkedin.com/jobs/view/{element.get('entityUrn', '').split(':')[-1]}" if element.get("entityUrn") else "",
-                                "posted": element.get("listedAt", ""),
+                                "title": title,
+                                "company": company_name,
+                                "location": loc,
+                                "url": f"https://www.linkedin.com/jobs/view/{job_id}" if job_id else "",
                                 "keyword_matched": keyword,
                             }
                             if job["title"]:
                                 all_jobs.append(job)
-
-                # Try alternative job search endpoint
-                if not all_jobs:
-                    resp = await client.get(
-                        f"{LINKEDIN_API}/search/dash/clusters",
-                        params={
-                            "decorationId": "com.linkedin.voyager.dash.deco.search.SearchClusterCollection-175",
-                            "origin": "JOB_SEARCH_PAGE_QUERY_EXPANSION",
-                            "q": "all",
-                            "query": f"(keywords:{query},resultType:List(JOBS))",
-                            "start": 0,
-                            "count": 25,
-                        },
-                        headers=headers,
-                    )
-
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        for element in data.get("included", []):
-                            if element.get("$type", "").endswith("JobPosting") or "title" in element:
-                                job = {
-                                    "title": element.get("title", ""),
-                                    "company": element.get("primarySubtitle", {}).get("text", "") if isinstance(element.get("primarySubtitle"), dict) else element.get("companyName", ""),
-                                    "location": element.get("secondarySubtitle", {}).get("text", "") if isinstance(element.get("secondarySubtitle"), dict) else "",
-                                    "url": f"https://www.linkedin.com/jobs/view/{element.get('trackingUrn', element.get('entityUrn', '')).split(':')[-1]}",
-                                    "keyword_matched": keyword,
-                                }
-                                if job["title"]:
-                                    all_jobs.append(job)
 
             except Exception:
                 continue
@@ -1373,9 +1479,29 @@ async def search_linkedin_jobs(
 
 
 @mcp.tool()
-async def get_linkedin_company(
-    company: str,
+async def search_linkedin_jobs(
+    company: str | None = None,
+    keywords: list[str] | None = None,
+    location: str | None = None,
 ) -> dict:
+    """
+    Search LinkedIn for job postings mentioning Claude/Anthropic.
+    Can filter by company and/or search across all companies.
+    Uses LinkedIn's Voyager API directly (no Selenium needed).
+
+    Args:
+        company: Company name to filter by (optional)
+        keywords: Search keywords (default: Claude, Anthropic, Claude Code)
+        location: Location filter (optional, e.g., "San Francisco")
+
+    Returns:
+        Job postings mentioning Claude/Anthropic
+    """
+    return await _search_linkedin_jobs_impl(company, keywords, location)
+
+
+@mcp.tool()
+async def get_linkedin_company(company: str) -> dict:
     """
     Get LinkedIn company profile information.
     Useful for enriching company data found from other sources.
@@ -1394,7 +1520,16 @@ async def get_linkedin_company(
             "setup": "Get li_at cookie from Chrome DevTools > Application > Cookies > linkedin.com",
         }
 
-    headers = get_linkedin_headers()
+    # Get valid LinkedIn session with JSESSIONID
+    session = await _get_linkedin_session()
+    if not session:
+        return {
+            "error": "LinkedIn cookie expired or invalid",
+            "setup": "Refresh your li_at cookie from Chrome DevTools",
+        }
+
+    cookie, jsessionid = session
+    headers = get_linkedin_headers_sync(cookie, jsessionid)
 
     # Extract company slug from URL if provided
     company_slug = company
@@ -1491,23 +1626,8 @@ async def get_linkedin_company(
     }
 
 
-@mcp.tool()
-async def search_web_signals(
-    company: str,
-    signal_type: str = "all",
-) -> dict:
-    """
-    Search the web for Claude/Anthropic signals using Brave Search API.
-    Searches LinkedIn posts, news articles, and engineering blogs.
-    Requires free Brave API key (get at https://brave.com/search/api/).
-
-    Args:
-        company: Company name to search for
-        signal_type: "all", "linkedin", "news", or "blogs"
-
-    Returns:
-        Web mentions of the company using Claude/Anthropic
-    """
+async def _search_web_signals_impl(company: str, signal_type: str = "all") -> dict:
+    """Internal implementation for web signals search."""
     if not BRAVE_API_KEY:
         return {
             "status": "skipped",
@@ -1595,6 +1715,23 @@ async def search_web_signals(
 
 
 @mcp.tool()
+async def search_web_signals(company: str, signal_type: str = "all") -> dict:
+    """
+    Search the web for Claude/Anthropic signals using Brave Search API.
+    Searches LinkedIn posts, news articles, and engineering blogs.
+    Requires free Brave API key (get at https://brave.com/search/api/).
+
+    Args:
+        company: Company name to search for
+        signal_type: "all", "linkedin", "news", or "blogs"
+
+    Returns:
+        Web mentions of the company using Claude/Anthropic
+    """
+    return await _search_web_signals_impl(company, signal_type)
+
+
+@mcp.tool()
 async def full_multi_source_scan(
     company: str,
     include_web: bool = True,
@@ -1618,7 +1755,7 @@ async def full_multi_source_scan(
 
     # 1. GitHub scan
     if GITHUB_TOKEN:
-        github_result = await does_company_use_claude(company)
+        github_result = await _does_company_use_claude_impl(company)
         evidence["github"] = github_result
 
         if github_result.get("uses_claude") == "yes":
@@ -1629,7 +1766,7 @@ async def full_multi_source_scan(
             signals.append({"source": "github", "signal": "Anthropic SDK usage", "weight": 30})
 
     # 2. Hacker News scan
-    hn_result = await search_hackernews_signals(company)
+    hn_result = await _search_hackernews_signals_impl(company)
     evidence["hackernews"] = hn_result
 
     if hn_result.get("total_mentions", 0) > 0:
@@ -1642,7 +1779,7 @@ async def full_multi_source_scan(
         })
 
     # 3. npm scan
-    npm_result = await check_npm_anthropic_usage(company)
+    npm_result = await _check_npm_anthropic_usage_impl(company)
     evidence["npm"] = npm_result
 
     if npm_result.get("packages_using_anthropic", 0) > 0:
@@ -1655,7 +1792,7 @@ async def full_multi_source_scan(
         })
 
     # 4. PyPI scan
-    pypi_result = await check_pypi_anthropic_usage(company)
+    pypi_result = await _check_pypi_anthropic_usage_impl(company)
     evidence["pypi"] = pypi_result
 
     if pypi_result.get("packages_using_anthropic", 0) > 0:
@@ -1670,7 +1807,7 @@ async def full_multi_source_scan(
     # 5. LinkedIn direct search (posts and jobs)
     if include_linkedin and LINKEDIN_COOKIE:
         # LinkedIn posts
-        linkedin_posts_result = await search_linkedin_posts(company)
+        linkedin_posts_result = await _search_linkedin_posts_impl(company)
         evidence["linkedin_posts"] = linkedin_posts_result
 
         if linkedin_posts_result.get("total_posts", 0) > 0:
@@ -1683,7 +1820,7 @@ async def full_multi_source_scan(
             })
 
         # LinkedIn jobs
-        linkedin_jobs_result = await search_linkedin_jobs(company=company)
+        linkedin_jobs_result = await _search_linkedin_jobs_impl(company=company)
         evidence["linkedin_jobs"] = linkedin_jobs_result
 
         if linkedin_jobs_result.get("claude_related_jobs", 0) > 0:
@@ -1697,7 +1834,7 @@ async def full_multi_source_scan(
 
     # 6. Web search (additional LinkedIn via Brave, News, Blogs)
     if include_web and BRAVE_API_KEY:
-        web_result = await search_web_signals(company)
+        web_result = await _search_web_signals_impl(company)
         evidence["web"] = web_result
 
         # Only add Brave LinkedIn if we didn't already get direct LinkedIn results
