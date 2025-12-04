@@ -1,6 +1,6 @@
 # Claude Adopter Finder
 
-MCP server that finds companies using Claude Desktop/Code by scanning job postings and GitHub.
+MCP server that finds companies using Claude Desktop/Code by scanning multiple sources: GitHub, Hacker News, npm, PyPI, LinkedIn, news, and job postings.
 
 ## Quick Start (5 minutes)
 
@@ -11,11 +11,25 @@ MCP server that finds companies using Claude Desktop/Code by scanning job postin
 - Create a new token (classic) with `public_repo` and `read:org` scopes
 - This is all you need to get started!
 
+**Brave Search (OPTIONAL - FREE tier: 2000 queries/month):**
+- Go to https://brave.com/search/api/
+- Sign up for free tier
+- Adds: LinkedIn posts, news articles, engineering blog search
+
 **TheirStack (OPTIONAL - for job posting search):**
 - Go to https://theirstack.com
 - Sign up and get an API key
 - Pricing: ~$299/month
-- Skip this for now - GitHub search works great alone!
+- Skip this for now - other sources work great!
+
+**FREE APIs (no key needed):**
+- Hacker News (Algolia API)
+- npm Registry
+- PyPI
+
+**LinkedIn MCP (OPTIONAL - requires session cookie):**
+- Direct LinkedIn scraping for profiles, companies, and jobs
+- See [LinkedIn MCP Setup](#linkedin-mcp-setup) below
 
 ### 2. Setup
 
@@ -71,25 +85,60 @@ Once connected, you can ask Claude:
 
 Runs `check_api_status` to verify your configuration.
 
-### Find Companies via Job Postings
-> "Find mid-market companies hiring for Claude skills in the last 30 days"
+### Quick Company Check
+> "Does Stripe use Claude?"
 
-Runs `find_claude_companies_jobs` - searches job postings for Claude/Anthropic mentions.
+Runs `does_company_use_claude` - fast check for a single company.
+
+### Full Multi-Source Scan (NEW)
+> "Run a full multi-source scan for Vercel"
+
+Runs `full_multi_source_scan` - scans ALL sources (GitHub, HN, npm, PyPI, LinkedIn, news) and returns a confidence score.
 
 ### Find Companies via GitHub
 > "Search GitHub for organizations using Claude Code"
 
 Runs `find_claude_companies_github` - finds repos with MCP configs, Anthropic SDK usage, etc.
 
+### Find Companies via Job Postings
+> "Find mid-market companies hiring for Claude skills in the last 30 days"
+
+Runs `find_claude_companies_jobs` - searches job postings for Claude/Anthropic mentions. (Requires TheirStack API)
+
+### Search Hacker News (NEW - FREE)
+> "Search Hacker News for discussions about Notion using Claude"
+
+Runs `search_hackernews_signals` - finds HN posts and comments mentioning company + Claude.
+
+### Check npm Packages (NEW - FREE)
+> "Check if Vercel has npm packages using Anthropic SDK"
+
+Runs `check_npm_anthropic_usage` - very high confidence signal when company publishes packages with Anthropic dependencies.
+
+### Check PyPI Packages (NEW - FREE)
+> "Check if OpenAI has PyPI packages using anthropic"
+
+Runs `check_pypi_anthropic_usage` - same as npm but for Python packages.
+
+### Search Web (LinkedIn, News, Blogs) (NEW)
+> "Search for LinkedIn posts and news about Stripe using Claude"
+
+Runs `search_web_signals` - searches LinkedIn posts, news articles, and engineering blogs. (Requires free Brave API key)
+
+### Batch Check Companies
+> "Check which of these companies use Claude: Stripe, Vercel, Shopify, Netflix"
+
+Runs `batch_check_companies` - check multiple companies at once for CRM enrichment.
+
+### CRM Integration
+> "Get my HubSpot companies and check which use Claude"
+
+Runs `check_companies_from_crm` - enriches CRM data with Claude usage signals.
+
 ### Analyze Specific Org
 > "Analyze Stripe's GitHub for Claude usage"
 
 Runs `analyze_org_claude_usage` - deep dive into a specific org's Claude signals.
-
-### Full Scan
-> "Run a full scan for Claude-adopting companies"
-
-Runs `full_claude_company_scan` - combines all sources for comprehensive results.
 
 ## Example Conversations
 
@@ -120,36 +169,134 @@ You: Great, can you format the top 20 results as a CSV I can
 Claude: [Formats results as CSV]
 ```
 
-## Signal Confidence Levels
+## Signal Confidence Levels & Scoring
 
-- **Very High**: MCP configs, Claude Code GitHub Actions, explicit "Claude Code" in job posts
-- **High**: Multiple signals from different sources, "Anthropic API" mentions
-- **Medium**: Generic "Claude" mentions, SDK imports
-- **Low**: Circumstantial signals
+The `full_multi_source_scan` tool uses weighted scoring:
+
+| Signal | Weight | Confidence |
+|--------|--------|------------|
+| MCP config in GitHub | 40 pts | Very High |
+| npm package with @anthropic-ai/sdk | 35 pts | Very High |
+| PyPI package with anthropic | 35 pts | Very High |
+| Anthropic SDK usage in code | 30 pts | High |
+| Engineering blog post | 30 pts | High |
+| LinkedIn employee post | 25 pts | High |
+| API key reference | 25 pts | High |
+| Job posting mention | 20 pts | High |
+| News article | 20 pts | Medium |
+| Hacker News mention | 15 pts | Medium |
+
+**Verdict Thresholds:**
+- **Very High (60+ pts)**: Multiple strong signals - definitely using Claude
+- **High (40-59 pts)**: At least one strong signal - likely using Claude
+- **Medium (20-39 pts)**: Some signals - possibly using Claude
+- **Low (<20 pts)**: Weak or no signals
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│           Claude Desktop                │
-│                                         │
-│  ┌───────────────────────────────────┐  │
-│  │    claude-adopter-finder MCP      │  │
-│  │                                   │  │
-│  │  Tools:                           │  │
-│  │  • find_claude_companies_jobs     │  │
-│  │  • find_claude_companies_github   │  │
-│  │  • analyze_org_claude_usage       │  │
-│  │  • full_claude_company_scan       │  │
-│  │  • check_api_status               │  │
-│  └───────────────────────────────────┘  │
-│           │               │             │
-│           ▼               ▼             │
-│    ┌──────────┐    ┌──────────┐        │
-│    │TheirStack│    │ GitHub   │        │
-│    │   API    │    │   API    │        │
-│    └──────────┘    └──────────┘        │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    Claude Desktop                        │
+│                                                          │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │           claude-adopter-finder MCP                │  │
+│  │                                                    │  │
+│  │  Core Tools:                                       │  │
+│  │  • full_multi_source_scan    (aggregated scan)    │  │
+│  │  • does_company_use_claude   (quick check)        │  │
+│  │  • batch_check_companies     (CRM enrichment)     │  │
+│  │                                                    │  │
+│  │  Signal Sources:                                   │  │
+│  │  • search_hackernews_signals (FREE)               │  │
+│  │  • check_npm_anthropic_usage (FREE)               │  │
+│  │  • check_pypi_anthropic_usage (FREE)              │  │
+│  │  • search_web_signals        (Brave API)          │  │
+│  │  • find_claude_companies_github (GitHub API)      │  │
+│  │  • find_claude_companies_jobs (TheirStack)        │  │
+│  └────────────────────────────────────────────────────┘  │
+│           │         │         │         │                │
+│           ▼         ▼         ▼         ▼                │
+│    ┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐          │
+│    │ GitHub │ │  HN    │ │  npm   │ │ Brave  │          │
+│    │  API   │ │Algolia │ │ PyPI   │ │ Search │          │
+│    │ (FREE) │ │ (FREE) │ │ (FREE) │ │ (FREE) │          │
+│    └────────┘ └────────┘ └────────┘ └────────┘          │
+└──────────────────────────────────────────────────────────┘
+```
+
+## LinkedIn MCP Setup
+
+The LinkedIn MCP server ([stickerdaniel/linkedin-mcp-server](https://github.com/stickerdaniel/linkedin-mcp-server)) provides direct LinkedIn scraping for:
+- **Profile scraping** - Get detailed info from LinkedIn profiles
+- **Company analysis** - Extract company information
+- **Job search** - Search jobs with filters
+- **Job details** - Get specific job posting info
+
+### Step 1: Get Your LinkedIn Cookie
+
+1. Open Chrome and log into LinkedIn
+2. Press F12 to open DevTools
+3. Go to **Application** → **Storage** → **Cookies** → `https://www.linkedin.com`
+4. Find the cookie named `li_at` and copy its value
+5. The cookie looks like: `AQEDAT...` (long string)
+
+> ⚠️ Cookie expires in ~30 days. Refresh when needed.
+
+### Step 2: Add to Claude Desktop Config
+
+Add this to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "claude-adopter-finder": {
+      "command": "/Users/adriandelasierra/.local/bin/uv",
+      "args": [
+        "run", "--directory",
+        "/Users/adriandelasierra/Desktop/desktop/innovation/ricky/claude-adopter-finder",
+        "python", "-m", "src.combined_scanner"
+      ]
+    },
+    "linkedin": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
+        "linkedin-mcp-server"
+      ],
+      "env": {
+        "LINKEDIN_COOKIE": "li_at=YOUR_COOKIE_HERE"
+      }
+    }
+  }
+}
+```
+
+### Step 3: Restart Claude Desktop
+
+Quit and reopen Claude Desktop. You now have both MCPs available.
+
+### LinkedIn MCP Tools
+
+Once configured, you can ask Claude:
+
+| Prompt | Tool Used |
+|--------|-----------|
+| "Get the profile of this person: linkedin.com/in/username" | `get_person_profile` |
+| "Get company info for Stripe from LinkedIn" | `get_company_profile` |
+| "Search LinkedIn jobs for 'AI Engineer' in San Francisco" | `search_jobs` |
+| "Get details for this job posting: linkedin.com/jobs/view/123" | `get_job_details` |
+
+### Combined Workflow Example
+
+```
+You: Find companies using Claude, then get their LinkedIn company profiles
+
+Claude: [Uses claude-adopter-finder to find companies]
+        Found 15 companies with Claude signals...
+
+        [Uses linkedin MCP to get company profiles]
+        Here's detailed info for each company from LinkedIn...
 ```
 
 ## Adding to Claude Code (CLI)

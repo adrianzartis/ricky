@@ -10,6 +10,17 @@
         "-m",
         "src.combined_scanner"
       ]
+    },
+    "linkedin": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/stickerdaniel/linkedin-mcp-server",
+        "linkedin-mcp-server"
+      ],
+      "env": {
+        "LINKEDIN_COOKIE": "li_at=AQEDAQU5Y8MCD2gSAAABmcPowocAAAGbDiP8IU4AoUO_fylCC-H_D6sf4F5fEaBpXiImB7KyKxasPjAwNkvMsFsMyX16oQmBRVmS5orUWT0Hioz9re2Dg9P8oxMrd4zsNcc__bLsXc3FOfbXaVntdsWU"
+      }
     }
   }
 }
