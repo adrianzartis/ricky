@@ -1516,6 +1516,80 @@ async def search_linkedin_jobs(
 
 
 @mcp.tool()
+async def find_companies_hiring_for_claude(
+    keywords: str | None = None,
+    location: str | None = None,
+) -> dict:
+    """
+    Find and return ONLY the deduplicated list of companies hiring for Claude/Anthropic roles.
+    Searches LinkedIn job postings and extracts unique company names.
+
+    Args:
+        keywords: Comma-separated search keywords (default: "Claude, Anthropic, Claude Code, MCP")
+                  Example: "Claude Code, MCP, Anthropic SDK"
+        location: Location filter (optional, e.g., "United States", "San Francisco")
+
+    Returns:
+        Deduplicated list of company names with job counts
+    """
+    # Get all jobs
+    result = await _search_linkedin_jobs_impl(None, keywords, location)
+
+    if "error" in result:
+        return result
+
+    jobs = result.get("jobs", [])
+
+    # Aggregate by company
+    company_data = {}
+    for job in jobs:
+        company_name = job.get("company", "").strip()
+        if not company_name:
+            continue
+
+        if company_name not in company_data:
+            company_data[company_name] = {
+                "company": company_name,
+                "job_count": 0,
+                "job_titles": [],
+                "locations": set(),
+                "keywords_matched": set(),
+            }
+
+        company_data[company_name]["job_count"] += 1
+        if job.get("title"):
+            company_data[company_name]["job_titles"].append(job["title"])
+        if job.get("location"):
+            company_data[company_name]["locations"].add(job["location"])
+        if job.get("keyword_matched"):
+            company_data[company_name]["keywords_matched"].add(job["keyword_matched"])
+
+    # Convert sets to lists and sort by job count
+    companies = []
+    for name, data in company_data.items():
+        companies.append({
+            "company": name,
+            "job_count": data["job_count"],
+            "job_titles": data["job_titles"][:3],  # Top 3 titles
+            "locations": list(data["locations"]),
+            "keywords_matched": list(data["keywords_matched"]),
+        })
+
+    # Sort by job count descending
+    companies.sort(key=lambda x: x["job_count"], reverse=True)
+
+    return {
+        "source": "linkedin_jobs",
+        "keywords_searched": keywords or "Claude, Anthropic, Claude Code, MCP",
+        "location_filter": location,
+        "total_companies": len(companies),
+        "total_jobs_found": len(jobs),
+        "companies": companies,
+        "company_names_only": [c["company"] for c in companies],
+    }
+
+
+@mcp.tool()
 async def get_linkedin_company(company: str) -> dict:
     """
     Get LinkedIn company profile information.
