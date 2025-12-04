@@ -1,0 +1,1 @@
+# Claude Adopter Finder MCP

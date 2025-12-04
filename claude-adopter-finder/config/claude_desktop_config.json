@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "claude-adopter-finder": {
+      "command": "/Users/adriandelasierra/.local/bin/uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/adriandelasierra/Desktop/desktop/innovation/ricky/claude-adopter-finder",
+        "python",
+        "-m",
+        "src.combined_scanner"
+      ]
+    }
+  }
+}
