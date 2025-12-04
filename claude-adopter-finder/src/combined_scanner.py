@@ -1337,6 +1337,7 @@ async def _search_linkedin_jobs_impl(
     company: str | None = None,
     keywords: str | None = None,
     location: str | None = None,
+    days_back: int = 7,
 ) -> dict:
     """Internal implementation for LinkedIn jobs search."""
     if not LINKEDIN_COOKIE:
@@ -1361,33 +1362,43 @@ async def _search_linkedin_jobs_impl(
     if keywords:
         search_keywords = [k.strip() for k in keywords.split(",") if k.strip()]
     else:
-        search_keywords = ["Claude", "Anthropic", "Claude Code", "MCP"]
+        # Use quotes for multi-word phrases to search as exact match
+        search_keywords = ["Claude", "Anthropic", '"Claude Code"', '"Anthropic API"']
+
+    # Auto-quote multi-word keywords that aren't already quoted
+    search_keywords = [
+        f'"{kw}"' if " " in kw and not kw.startswith('"') else kw
+        for kw in search_keywords
+    ]
     all_jobs = []
+    search_debug_info = []  # Track what searches were performed
+
+    # Convert days_back to LinkedIn's time filter format
+    # r86400 = 24h, r604800 = 7 days, r2592000 = 30 days
+    if days_back <= 1:
+        time_filter = "r86400"  # 24 hours
+    elif days_back <= 7:
+        time_filter = "r604800"  # 7 days
+    else:
+        time_filter = "r2592000"  # 30 days (max)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for keyword in search_keywords:
-            query = f"{company} {keyword}" if company else keyword
+            query = f'{company} {keyword}' if company else keyword
 
             try:
                 # Build query string in LinkedIn's format
-                query_dict = {
-                    "origin": "JOB_SEARCH_PAGE_QUERY_EXPANSION",
-                    "keywords": query,
-                    "selectedFilters": {
-                        "timePostedRange": "List(r86400)",  # Last 24 hours
-                    },
-                    "spellCorrectionEnabled": "true",
-                }
+                # Note: LinkedIn expects the keywords value to preserve quotes for exact matching
+                query_parts = [
+                    f"origin:JOB_SEARCH_PAGE_QUERY_EXPANSION",
+                    f"keywords:{query}",
+                    f"selectedFilters:(timePostedRange:List({time_filter}))",
+                    "spellCorrectionEnabled:true",
+                ]
                 if location:
-                    query_dict["locationFallback"] = location
+                    query_parts.append(f"locationFallback:{location}")
 
-                query_string = (
-                    str(query_dict)
-                    .replace(" ", "")
-                    .replace("'", "")
-                    .replace("{", "(")
-                    .replace("}", ")")
-                )
+                query_string = "(" + ",".join(query_parts) + ")"
 
                 # Use the correct endpoint from linkedin-api library
                 params = {
@@ -1399,11 +1410,22 @@ async def _search_linkedin_jobs_impl(
                 }
 
                 from urllib.parse import urlencode
-                url = f"{LINKEDIN_API}/voyagerJobsDashJobCards?{urlencode(params, safe='(),:')}"
+                # Include " in safe chars to preserve exact phrase quotes in keywords
+                safe_chars = '(),:"\''
+                url = f"{LINKEDIN_API}/voyagerJobsDashJobCards?{urlencode(params, safe=safe_chars)}"
+
                 resp = await client.get(
                     url,
                     headers={**headers, "accept": "application/vnd.linkedin.normalized+json+2.1"},
                 )
+
+                # Debug: track what we searched and got
+                search_debug = {
+                    "keyword": keyword,
+                    "query": query,
+                    "status_code": resp.status_code,
+                    "result_count": 0,
+                }
 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -1459,8 +1481,16 @@ async def _search_linkedin_jobs_impl(
                             }
                             if job["title"]:
                                 all_jobs.append(job)
+                                search_debug["result_count"] += 1
 
-            except Exception:
+                search_debug_info.append(search_debug)
+
+            except Exception as e:
+                search_debug_info.append({
+                    "keyword": keyword,
+                    "query": query,
+                    "error": str(e),
+                })
                 continue
 
     # Deduplicate by title + company
@@ -1489,6 +1519,11 @@ async def _search_linkedin_jobs_impl(
         "claude_related_jobs": len(claude_jobs),
         "signal_strength": "high" if len(claude_jobs) > 2 else "medium" if len(claude_jobs) > 0 else "none",
         "jobs": claude_jobs + other_jobs[:10],
+        "debug": {
+            "keywords_searched": search_keywords,
+            "time_filter": time_filter,
+            "searches": search_debug_info,
+        },
     }
 
 
@@ -1497,43 +1532,53 @@ async def search_linkedin_jobs(
     company: str | None = None,
     keywords: str | None = None,
     location: str | None = None,
+    days_back: int = 7,
 ) -> dict:
     """
     Search LinkedIn for job postings mentioning Claude/Anthropic.
     Can filter by company and/or search across all companies.
     Uses LinkedIn's Voyager API directly (no Selenium needed).
 
+    Multi-word phrases are automatically quoted for exact matching.
+
     Args:
         company: Company name to filter by (optional)
-        keywords: Comma-separated search keywords (default: "Claude, Anthropic, Claude Code, MCP")
-                  Example: "Claude Code, MCP, Anthropic SDK"
+        keywords: Comma-separated search keywords. Multi-word phrases auto-quoted.
+                  Default: Claude, Anthropic, "Claude Code", "Anthropic API"
+                  Example: "Claude Code, MCP server, Anthropic SDK"
         location: Location filter (optional, e.g., "San Francisco")
+        days_back: How far back to search (1=24h, 7=week, 30=month). Default: 7
 
     Returns:
         Job postings mentioning Claude/Anthropic with company names
     """
-    return await _search_linkedin_jobs_impl(company, keywords, location)
+    return await _search_linkedin_jobs_impl(company, keywords, location, days_back)
 
 
 @mcp.tool()
 async def find_companies_hiring_for_claude(
     keywords: str | None = None,
     location: str | None = None,
+    days_back: int = 30,
 ) -> dict:
     """
     Find and return ONLY the deduplicated list of companies hiring for Claude/Anthropic roles.
     Searches LinkedIn job postings and extracts unique company names.
 
+    Multi-word phrases are automatically quoted for exact matching.
+
     Args:
-        keywords: Comma-separated search keywords (default: "Claude, Anthropic, Claude Code, MCP")
-                  Example: "Claude Code, MCP, Anthropic SDK"
+        keywords: Comma-separated search keywords. Multi-word phrases auto-quoted.
+                  Default: Claude, Anthropic, "Claude Code", "Anthropic API"
+                  Example: "Claude Code, MCP server, Anthropic SDK"
         location: Location filter (optional, e.g., "United States", "San Francisco")
+        days_back: How far back to search (1=24h, 7=week, 30=month). Default: 30
 
     Returns:
         Deduplicated list of company names with job counts
     """
     # Get all jobs
-    result = await _search_linkedin_jobs_impl(None, keywords, location)
+    result = await _search_linkedin_jobs_impl(None, keywords, location, days_back)
 
     if "error" in result:
         return result
